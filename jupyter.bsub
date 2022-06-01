@@ -1,0 +1,28 @@
+#### START - Scheduler parameters ####
+
+#BSUB -J dlane               # job name
+#BSUB -o dlane.%J.stdout     # have output written to specific file
+#BSUB -e dlane.%J.stderr     # have errors written to specific file
+#BSUB -q rb_cc_cr_challenge                     # select the queue: rb_regular, rb_highend
+#BSUB -W 12:00                           # fill in desired wallclock time [hours,]minutes (hours are optional)
+#BSUB -n 4                              # min CPU cores,max CPU cores (max cores is optional)
+#BSUB -M 4096                           # fill in required amount of RAM (in Mbyte)
+# #BSUB -R "span[hosts=1]"          # optional: run on single host (if using more than 1 CPU cores)
+# #BSUB -R "span[ptile=16]"         # optional: fill in to specify cores per node (up to 48)
+# #BSUB -P myProject                # optional: fill in cluster project
+#BSUB -gpu "num=1:mode=exclusive_process:mps=no" # use 1 GPU (in explusive process mode)
+#### END - Scheduler parameter ####
+
+#### START - Config Parameter ####
+#MODULES_TO_LOAD="conda/4.5.13" 
+MODULES_TO_LOAD="conda/4.5.13 cuda/10.2.89 cudnn/10.2_v7.6"
+CONDA_ENV="Py37-Cuda10.2-Clone"
+#### END - Config Parameter ####
+
+module purge
+module load $MODULES_TO_LOAD
+source activate $CONDA_ENV
+
+sleep 10
+
+python train_net.py --workspace_name oct28 --gpu_beg 0 --gpu_cnt 1 --config_file e2e_mask_rcnn_R_50_FPN_1x.yaml SOLVER.IMS_PER_BATCH 48 MODEL.WEIGHT "exp/oct28/model_0030500.pth" SOLVER.BASE_LR 0.000001 SOLVER.CHECKPOINT_PERIOD 500  

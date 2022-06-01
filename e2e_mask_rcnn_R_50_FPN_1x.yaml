@@ -1,0 +1,76 @@
+MODEL:
+  META_ARCHITECTURE: "LaneDetector"
+  HEAD_TYPE: 1 # use update heads
+  WEIGHT: "e2e_mask_rcnn_R_50_FPN_BB.pth"
+  BACKBONE:
+    CONV_BODY: "R-50-FPN"
+  RESNETS:
+    BACKBONE_OUT_CHANNELS: 256
+  RPN:
+    USE_FPN: True
+    ANCHOR_STRIDE: (4, 8, 16, 32, 64)
+    PRE_NMS_TOP_N_TRAIN: 2000
+    PRE_NMS_TOP_N_TEST: 1000
+    POST_NMS_TOP_N_TEST: 1000
+    FPN_POST_NMS_TOP_N_TEST: 1000
+  ROI_HEADS:
+    USE_FPN: True
+  ROI_BOX_HEAD:
+    POOLER_RESOLUTION: 7
+    POOLER_SCALES: (0.25, 0.125, 0.0625, 0.03125)
+    POOLER_SAMPLING_RATIO: 2
+    FEATURE_EXTRACTOR: "FPN2MLPFeatureExtractor"
+    PREDICTOR: "FPNPredictor"
+  ROI_MASK_HEAD:
+    POOLER_SCALES: (0.25, 0.125, 0.0625, 0.03125)
+    FEATURE_EXTRACTOR: "MaskRCNNFPNFeatureExtractor"
+    PREDICTOR: "MaskRCNNC4Predictor"
+    POOLER_RESOLUTION: 14
+    POOLER_SAMPLING_RATIO: 2
+    RESOLUTION: 28
+    SHARE_BOX_FEATURE_EXTRACTOR: False
+  MASK_ON: True
+  GFN: # grid fusion net
+    INTERNAL_CHANNEL: 64
+  GFH: # grid fusion head
+    INTERNAL_CHANNEL: 64
+  HG: # grid instance head
+    INTERNAL_CHANNEL: 128
+  FPN:
+    USE_GN: True
+    USE_RELU: True
+INPUT:
+  INPUT_IMAGE_SIZE: (256, 512)
+  ORIGINAL_IMAGE_SIZE: (720, 1280)
+  ANNOTATION:
+    NUM_CLASS: 2
+    POINTS_PER_LANE: 80
+    ANCHOR_STRIDE: 16
+    FEATURE_SIZE: 4
+DATASETS:
+  TRAIN: ("aicom_lane_train",) # ("coco_2014_train", "coco_2014_valminusminival")
+  TEST: ("aicom_lane_test",) # ("coco_2014_minival",)
+  INFERENCE: ("aicom_lane_inference",)
+DATALOADER:
+  SIZE_DIVISIBILITY: 32
+  ASPECT_RATIO_GROUPING: False
+  WEIGHTED_SAMPLE: True
+  WEIGHTED_SAMPLE_INPUT: "img_loss_oct29.pth"
+LOSS:
+  INSTANCE:
+    K1: 1.0
+    ALPHA: 0.5
+    BETA: 0.5
+SOLVER:
+  IMS_PER_BATCH: 8 # gpus*batch_per_gpu, 16->4.5G
+  BASE_LR: 0.0001 # 0.02
+  WEIGHT_DECAY: 0.0001
+  STEPS: (60000, 80000)
+  MAX_ITER: 90000
+  CHECKPOINT_PERIOD: 2000
+  TEST_PERIOD: 0
+TEST:
+  IMS_PER_BATCH: 8
+OUTPUT_DIR: "exp"
+DO_POST_PROC: False
+HARD_CASE_UPDATE_PERIOD: 800 # around 1 epoch

@@ -1,0 +1,339 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+import logging
+import time
+import os
+
+import torch
+from tqdm import tqdm
+
+# from maskrcnn_benchmark.data.datasets.evaluation import evaluate
+from ..utils.comm import is_main_process, get_world_size
+from ..utils.comm import all_gather
+from ..utils.comm import synchronize
+from ..utils.timer import Timer, get_time_str
+# from .bbox_aug import im_detect_bbox_aug
+
+import torch
+from torch import nn
+from torch.nn import functional as F
+from collections import ChainMap
+import ujson
+import numpy as np
+
+from maskrcnn_benchmark.data.utils.auto_lane_codec_utils import nms_with_pos, order_lane_x_axis
+from maskrcnn_benchmark.data.utils.auto_lane_codec_utils import convert_lane_to_dict
+from maskrcnn_benchmark.data.utils.auto_lane_codec_utils import calc_err_dis_with_pos
+
+import maskrcnn_benchmark.engine.post_proc_util as post_proc_util
+
+
+
+def multidict_split(bundle_dict):
+    """Split multi dict to retail dict.
+
+    :param bundle_dict: a buddle of dict
+    :type bundle_dict: a dict of list
+    :return: retails of dict
+    :rtype: list
+    """
+    retails_list = [dict(zip(bundle_dict, i)) for i in zip(*bundle_dict.values())]
+    return retails_list
+
+# def compute_on_dataset(model, data_loader, device, bbox_aug, timer=None):
+def compute_on_dataset(cfg, model, data_loader, device, timer=None, dataset=None):
+    model.eval()
+    results_dict = {}
+    cpu_device = torch.device("cpu")
+    for inference_idx, batch in enumerate(tqdm(data_loader)):
+        images, image_ids = batch
+        with torch.no_grad():
+            if timer:
+                timer.tic()
+            #if bbox_aug:
+            #    output = im_detect_bbox_aug(model, images, device)
+            #else:
+            #    output = model(images.to(device))
+            predicts, instances = model(images.to(device))
+            output = post_process(images, predicts, instances[-1], dataset)
+
+            if timer:
+                if not device.type == 'cpu':
+                    torch.cuda.synchronize()
+                timer.toc()
+            # output = [o.to(cpu_device) for o in output]
+
+        results_dict.update(
+            {img_id.item(): result for img_id, result in zip(image_ids, output)}
+        )
+        if inference_idx == 5 and cfg.DEBUG:
+            break
+    return results_dict
+
+def post_process(images, predicts, instances, dataset):
+    # 
+    batch_size = instances.size(0)
+    feature_size = 4
+    decode_lane = dataset.codec_obj.decode_lane
+
+    # to cpu
+    predict_loc = predicts['predict_loc'].detach().cpu().numpy()
+    predict_conf = F.softmax(predicts['predict_cls'], -1).detach().cpu().numpy()
+
+    instances = instances.permute((0, 2, 3, 1)).contiguous() # =>[N, grid_h, grid_w, 4]
+    instances = instances.view(batch_size, -1, feature_size) # =>[N, grid_h*grid_w, 4]
+    predict_ins = instances.detach().cpu().numpy()
+
+    '''
+    predict_result = dict(
+        image=images.permute((0, 2, 3, 1)).detach().contiguous().cpu().numpy(),
+        regression=predict_loc,
+        classfication=predict_conf,
+    )
+    bundle_result = ChainMap(kwargs, predict_result)
+    '''
+
+    results = []
+    # for index, retail_dict_spec in enumerate(multidict_split(bundle_result)):
+    for index, _ in enumerate( range(batch_size) ):
+        # lane_set = self.pointlane_codec.decode_lane(
+        # lane_set, grid_set = decode_lane(
+        #    predict_type=retail_dict_spec['classfication'],
+        #    predict_loc=retail_dict_spec['regression'], cls_thresh=0.6)
+        lane_set, grid_set = decode_lane(
+            predict_type=predict_conf[index],
+            predict_loc=predict_loc[index], 
+            cls_thresh=0.6)
+
+        # lane_nms_set = nms_with_pos(lane_set, thresh=60)
+        '''
+        net_input_image_shape = ujson.loads(retail_dict_spec['net_input_image_shape'])
+        src_image_shape = ujson.loads(retail_dict_spec['src_image_shape'])
+        lane_order_set = order_lane_x_axis(lane_nms_set, net_input_image_shape['height'])
+        scale_x = src_image_shape['width'] / net_input_image_shape['width']
+        scale_y = src_image_shape['height'] / net_input_image_shape['height']
+
+        predict_json = convert_lane_to_dict(lane_order_set, scale_x, scale_y)
+        target_json = ujson.loads(retail_dict_spec['annot'])
+        results.append(dict(pr_result={**predict_json, **dict(Shape=src_image_shape)},
+                            gt_result={**target_json, **dict(Shape=src_image_shape)}))
+        '''
+        '''
+        lines = []
+        for line in lane_nms_set:
+            grid_cx, grid_cy = line.ax, line.ay
+            line = [ [pt.x, pt.y] for pt in line.lane if pt.x >= .0]
+            lines.append(line)
+            # instance
+        '''
+
+        # confidance = predict_conf[index] # [grids, 1]
+        # offsets = predict_loc[index] # [grids, 161]
+        instance = predict_ins[index] # [grids=512, 4]
+        # lane_grid: [ [lid, lid...], [], [] ]
+        lane_grid = generate_result(instance, grid_set, thresh=0.6)
+        
+        lines = list()
+        for it in lane_grid:
+            line = list()
+            for i in it: # candidates for this line
+                line.append(lane_set[i])
+            lines.append(line)
+
+        post_proc_util()
+        g_rx, g_ry = 1280/512., 720/256.
+        g_stride=16.
+        final_lines = post_proc(img_id, pred, g_rx, g_ry, g_stride)
+        '''
+        new_lines = list()
+        for line_candidates in lines:
+            lane_nms_set = nms_with_pos(line_candidates, thresh=60)
+            new_lines.append(lane_nms_set)
+        
+        drop=[]
+        remain=[]
+        for i, i_cands in enumerate(new_lines):
+            for j, j_cands in enumerate(new_lines):
+                if i != j:
+                    for it in i_cands:
+                        for jt in j_cands:
+                            dist = calc_err_dis_with_pos(it, jt)
+                            if dist <= 60 and j not in drop:
+                                drop.append(j)
+                                continue
+        lines = list()
+        for i, i_cands in enumerate(new_lines):
+            if i not in drop:
+                lines.append(i_cands)
+        '''
+        results.append(lines)
+
+    return results
+
+def generate_result(instance, grid_set, thresh=0.6):
+
+    grid_y, grid_x = 16, 32
+
+    # confidance = confidance.reshape(grid_y, grid_x)
+    # mask = confidance > thresh
+
+    # grid_location = np.zeros((grid_y, grid_x, 2))
+
+    # grid = grid_location[mask]
+    # offset = offsets[mask]
+    # feature = instance[mask] # [valid_num, 4]
+    feature = instance[grid_set] # [num_decode_lines, 4]
+    lane_feature = []
+    lane_grid = []
+    # x = []
+    # y = []
+    # for i in range(len(grid)):
+    for i in range( feature.shape[0] ):
+        if (np.sum(feature[i]**2))>=0: # for i-th valid grid's feature
+
+            if len(lane_feature) == 0:
+                # create new lane
+                lane_feature.append(feature[i])
+                lane_grid.append([i]) # append feat id
+                #x.append([point_x])
+                #y.append([point_y])
+            else:
+                # flag = 0
+                # index = 0
+                min_feature_index = -1
+                min_feature_dis = 10000
+
+                for feature_idx, j in enumerate(lane_feature):
+                    dis = np.linalg.norm((feature[i] - j)**2)
+                    if min_feature_dis > dis:
+                        min_feature_dis = dis # dist to this lane feat
+                        min_feature_index = feature_idx # lane id
+
+                if min_feature_dis <= 0.08:
+                    # update feat of this lane
+                    # lane_feature[min_feature_index] = (lane_feature[min_feature_index]*len(x[min_feature_index]) + feature[i])\
+                    #                                   / (len(x[min_feature_index])+1)
+                    temp_feat = lane_feature[min_feature_index]
+                    n_grid = len(lane_grid[min_feature_index]) 
+                    # lane feat + cur grid feat
+                    lane_feature[min_feature_index] = (temp_feat * n_grid + feature[i]) / (n_grid + 1)
+                    lane_grid[min_feature_index].append(i)
+                    #x[min_feature_index].append(point_x)
+                    #y[min_feature_index].append(point_y)
+                elif len(lane_feature) < 12:
+                    # create new lane
+                    lane_feature.append(feature[i])
+                    lane_grid.append([i])
+                    #x.append([point_x])
+                    #y.append([point_y])
+    #
+    return lane_grid
+
+def _accumulate_predictions_from_multiple_gpus(predictions_per_gpu):
+    all_predictions = all_gather(predictions_per_gpu)
+    if not is_main_process():
+        return
+    # merge the list of dicts
+    predictions = {}
+    for p in all_predictions:
+        predictions.update(p)
+    # convert a dict where the key is the index in a list
+    image_ids = list(sorted(predictions.keys()))
+    if len(image_ids) != image_ids[-1] + 1:
+        logger = logging.getLogger("maskrcnn_benchmark.inference")
+        logger.warning(
+            "Number of images that were gathered from multiple processes is not "
+            "a contiguous set. Some images might be missing from the evaluation.")
+
+    # convert to a list
+    # predictions = [predictions[i] for i in image_ids]
+    return predictions
+
+def inference(
+    cfg,
+    model,
+    data_loader,
+    dataset_name,
+    # iou_types=("bbox",),
+    # box_only=False,
+    # bbox_aug=False,
+    device="cuda",
+    expected_results=(),
+    expected_results_sigma_tol=4,
+    output_folder=None,
+    output_file=None,
+):
+    # convert to a torch.device for efficiency
+    device = torch.device(device)
+    num_devices = get_world_size()
+    logger = logging.getLogger("maskrcnn_benchmark.inference")
+    dataset = data_loader.dataset
+    logger.info("Start evaluation on {} dataset({} images).".format(dataset_name, len(dataset)))
+    total_timer = Timer()
+    inference_timer = Timer()
+    total_timer.tic()
+    # predictions = compute_on_dataset(model, data_loader, device, bbox_aug, inference_timer)
+    predictions = compute_on_dataset(cfg, model, data_loader, device, inference_timer, dataset=dataset)
+    # wait for all processes to complete before measuring the time
+    synchronize()
+    total_time = total_timer.toc()
+    total_time_str = get_time_str(total_time)
+    logger.info(
+        "Total run time: {} ({} s / img per device, on {} devices)".format(
+            total_time_str, total_time * num_devices / len(dataset), num_devices
+        )
+    )
+    total_infer_time = get_time_str(inference_timer.total_time)
+    logger.info(
+        "Model inference time: {} ({} s / img per device, on {} devices)".format(
+            total_infer_time,
+            inference_timer.total_time * num_devices / len(dataset),
+            num_devices,
+        )
+    )
+
+
+    ###
+    '''
+    logger.info("Start to post proc...")
+    final_res = list()
+    for i, (img_id, pred) in enumerate( tqdm( predictions.items() ) ):
+        g_rx, g_ry = 1280/512., 720/256.
+        g_stride=16.
+        final_lines = post_proc(img_id, pred, g_rx, g_ry, g_stride)
+        final_res.append({ img_id: final_lines })
+    '''
+
+    
+
+    '''
+    predictions = _accumulate_predictions_from_multiple_gpus(predictions)
+    if not is_main_process():
+        return
+
+    if output_folder:
+        output_file = "inference_results.pth" if output_file==None else output_file+".pth"
+        outputs = {
+            'predictions': predictions,
+            'test_images': dataset.test_imgs
+        }
+        # torch.save(outputs, os.path.join(output_folder, "results.pth"))
+        torch.save(outputs, os.path.join(output_folder, output_file))
+        logger.info("Successfully save results in {}".format( 
+            os.path.join(output_folder, output_file) ))
+        # torch.save(predictions, os.path.join(output_folder, "predictions.pth"))
+    '''
+
+
+    '''
+    extra_args = dict(
+        box_only=box_only,
+        iou_types=iou_types,
+        expected_results=expected_results,
+        expected_results_sigma_tol=expected_results_sigma_tol,
+    )
+
+    return evaluate(dataset=dataset,
+                    predictions=predictions,
+                    output_folder=output_folder,
+                    **extra_args)
+    '''

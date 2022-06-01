@@ -1,0 +1,14 @@
+python -m torch.distributed.launch --nproc_per_node=2 train_net.py --workspace_name oct26 --gpu_beg 7 --gpu_cnt 2 --config_file e2e_mask_rcnn_R_50_FPN_1x.yaml   SOLVER.IMS_PER_BATCH 96   MODEL.WEIGHT "exp/oct26/init.pth"   SOLVER.BASE_LR 0.00001   SOLVER.CHECKPOINT_PERIOD 500   HARD_CASE_UPDATE_PERIOD 800
+
+python  -m torch.distributed.launch --nproc_per_node=4  test_net.py --workspace_name oct26 --gpu_beg 2 --gpu_cnt 4  --ckpt "exp/oct23/model_0082500.pth" --out_file "oct26_res01"  --config_file e2e_mask_rcnn_R_50_FPN_1x.yaml   TEST.IMS_PER_BATCH 480
+
+python  -m torch.distributed.launch --nproc_per_node=4   opt_post_proc.py   --gpu_beg 0   --gpu_cnt 4   --debug 1   --out_file oct26_post01
+
+
+
+
+
+
+
+
+
